@@ -1,0 +1,216 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from tkinter.ttk import Progressbar
+import threading
+import webbrowser
+import requests
+from requests_oauthlib import OAuth2Session
+from flask import Flask, request
+import os
+import sys
+
+# --- CONFIG ---
+CLIENT_ID = "xyza78917x4Wmk9n9jv4187IuZjHEqIL"
+CLIENT_SECRET = ""  # Si no quieres usar client_secret, déjalo vacío. Si es obligatorio, ponlo aquí.
+REDIRECT_URI = "http://localhost:5000/callback"
+AUTHORIZATION_BASE_URL = "https://www.epicgames.com/id/authorize"
+TOKEN_URL = "https://account-public-service-prod.ol.epicgames.com/account/api/oauth/token"
+
+# Fortnite API
+FORTNITE_API_KEY = "35b2f455-02f9-4bda-b9e8-c9fb7742b8e4"
+HEADERS = {"Authorization": f"Bearer {FORTNITE_API_KEY}"}
+
+# --- VARIABLES GLOBALES ---
+oauth_session = None
+oauth_state_global = None
+access_token = None
+
+# --- FLASK APP ---
+app = Flask(__name__)
+
+@app.route("/callback")
+def callback():
+    global oauth_session, access_token, oauth_state_global
+    code = request.args.get('code')
+    state = request.args.get('state')
+    if state != oauth_state_global:
+        return "Error: estado no coincide (possible CSRF attack)", 400
+    try:
+        token = oauth_session.fetch_token(
+            TOKEN_URL,
+            client_secret=CLIENT_SECRET,
+            code=code,
+        )
+        access_token = token.get('access_token')
+        print(f"Access token obtenido: {access_token}")
+        return "¡Login exitoso! Puedes cerrar esta ventana y volver a la app."
+    except Exception as e:
+        return f"Error al obtener token: {e}", 500
+
+def run_flask():
+    # Quitar logs Flask para que no molesten
+    import logging
+    log = logging.getLogger('werkzeug')
+    log.setLevel(logging.ERROR)
+    app.run(port=5000, debug=False, use_reloader=False)
+
+# --- FUNCIONES TKINTER ---
+
+def iniciar_sesion_epic():
+    global oauth_session, oauth_state_global
+    oauth_session = OAuth2Session(
+        CLIENT_ID,
+        redirect_uri=REDIRECT_URI,
+        scope=["profile", "offline_access", "openid"],
+    )
+    authorization_url, state = oauth_session.authorization_url(AUTHORIZATION_BASE_URL)
+    oauth_state_global = state
+    webbrowser.open(authorization_url)
+    messagebox.showinfo(
+        "Iniciar sesión",
+        f"Se abrió el navegador para iniciar sesión.\n"
+        f"Si no, copia esta URL en tu navegador:\n\n{authorization_url}",
+    )
+
+def chequear_cuenta(nombre_usuario):
+    global access_token, cuentas_validas, cuentas_invalidas
+
+    url = f"https://fortnite-api.com/v2/stats/br/v2?name={nombre_usuario}"
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=10)
+    except Exception as e:
+        resultado.insert(tk.END, f"Error al conectar con la API para {nombre_usuario}: {e}\n")
+        cuentas_invalidas += 1
+        return
+
+    if response.status_code == 200:
+        data = response.json().get("data", {})
+        platform = data.get("platform", "N/A")
+        level = data.get("battlePass", {}).get("level", "N/A")
+        stats = data.get("stats", {}).get("all", {}).get("overall", {})
+
+        if access_token:
+            locker_info = obtener_locker_privado()
+            skins = locker_info.get("skins", [])
+            skins_str = "\n  ".join([f"Skin: {skin['name']}" for skin in skins]) if skins else "No tiene skins disponibles."
+
+            texto = f"Cuenta: {nombre_usuario}\n"
+            texto += f"  Plataforma: {platform}\n"
+            texto += f"  Nivel del pase de batalla: {level}\n"
+            texto += f"  Kills: {stats.get('kills', 'N/A')}\n"
+            texto += f"  Wins: {stats.get('wins', 'N/A')}\n"
+            texto += f"  Partidas: {stats.get('matches', 'N/A')}\n"
+            texto += f"  Skins:\n  {skins_str}\n"
+            texto += "-" * 50 + "\n"
+            cuentas_validas += 1
+        else:
+            texto = f"Cuenta: {nombre_usuario} ❌ Sin acceso al locker (OAuth requerido)\n" + "-" * 50 + "\n"
+            cuentas_invalidas += 1
+
+    elif response.status_code == 404:
+        texto = f"Cuenta: {nombre_usuario} ❌ NO ENCONTRADA\n" + "-" * 50 + "\n"
+        cuentas_invalidas += 1
+    elif response.status_code == 401:
+        texto = f"Cuenta: {nombre_usuario} ❌ Error 401 - Token inválido o expirado.\nPor favor, inicia sesión nuevamente.\n" + "-" * 50 + "\n"
+        cuentas_invalidas += 1
+    else:
+        texto = f"⚠️ Error al chequear {nombre_usuario}: {response.status_code}\n"
+        cuentas_invalidas += 1
+
+    resultado.insert(tk.END, texto)
+    resultado.see(tk.END)
+
+def obtener_locker_privado():
+    global access_token
+    if not access_token:
+        messagebox.showerror("Error", "No se ha obtenido un token de acceso válido.")
+        return {}
+
+    locker_url = "https://fortnite-public-service-prod11.ol.epicgames.com/fortnite/api/game/v2/profile/me"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    try:
+        response = requests.get(locker_url, headers=headers)
+        if response.status_code == 200:
+            return response.json().get("profile", {}).get("locker", {})
+        elif response.status_code == 401:
+            messagebox.showerror("Error 401", "Token expirado o inválido. Por favor inicia sesión nuevamente.")
+            return {}
+        else:
+            messagebox.showerror("Error", f"Error al obtener el locker: {response.status_code}")
+            return {}
+    except Exception as e:
+        messagebox.showerror("Error", f"Error al obtener el locker: {e}")
+        return {}
+
+def cargar_archivo():
+    global cuentas_validas, cuentas_invalidas
+    cuentas_validas = 0
+    cuentas_invalidas = 0
+
+    file_path = filedialog.askopenfilename(filetypes=[("Text files", "*.txt")])
+    if not file_path:
+        return
+
+    with open(file_path, "r", encoding="utf-8") as f:
+        cuentas = [line.strip() for line in f if line.strip()]
+
+    resultado.delete("1.0", tk.END)
+    progress_bar["maximum"] = len(cuentas)
+    progress_bar["value"] = 0
+
+    for i, cuenta in enumerate(cuentas):
+        root.update()
+        chequear_cuenta(cuenta)
+        progress_bar["value"] = i + 1
+
+    resumen = f"\n✔️ Cuentas válidas: {cuentas_validas} | ❌ Inválidas: {cuentas_invalidas}\n"
+    resultado.insert(tk.END, resumen)
+    resultado.see(tk.END)
+
+def guardar_resultados():
+    texto = resultado.get("1.0", tk.END).strip()
+    if not texto:
+        messagebox.showwarning("Aviso", "No hay resultados para guardar.")
+        return
+
+    archivo = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text Files", "*.txt")])
+    if archivo:
+        with open(archivo, "w", encoding="utf-8") as f:
+            f.write(texto)
+        messagebox.showinfo("Guardado", "Resultados guardados correctamente.")
+
+# --- TKINTER SETUP ---
+root = tk.Tk()
+root.title("Checker Fortnite con OAuth Epic")
+root.geometry("800x600")
+root.config(bg="black")
+
+frame_botones = tk.Frame(root, bg="black")
+frame_botones.pack(pady=10)
+
+btn_login = tk.Button(frame_botones, text="Iniciar sesión con Epic", command=iniciar_sesion_epic, bg="#0f0", fg="black", font=("Arial", 10, "bold"))
+btn_login.pack(side=tk.LEFT, padx=10)
+
+btn_cargar = tk.Button(frame_botones, text="Cargar cuentas de Epic", command=cargar_archivo, bg="#0f0", fg="black", font=("Arial", 10, "bold"))
+btn_cargar.pack(side=tk.LEFT, padx=10)
+
+btn_guardar = tk.Button(frame_botones, text="Guardar resultados", command=guardar_resultados, bg="#0f0", fg="black", font=("Arial", 10, "bold"))
+btn_guardar.pack(side=tk.LEFT, padx=10)
+
+progress_bar = Progressbar(root, orient=tk.HORIZONTAL, length=700, mode='determinate')
+progress_bar.pack(pady=10)
+
+resultado = tk.Text(root, bg="black", fg="lime", font=("Courier New", 10), wrap=tk.WORD)
+resultado.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
+
+# Variables para conteo
+cuentas_validas = 0
+cuentas_invalidas = 0
+
+# --- INICIAR FLASK EN HILO ---
+flask_thread = threading.Thread(target=run_flask, daemon=True)
+flask_thread.start()
+
+# --- INICIAR TKINTER ---
+root.mainloop()
+
